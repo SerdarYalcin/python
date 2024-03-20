@@ -1,0 +1,69 @@
+import boto3
+from botocore.exceptions import ClientError
+from datetime import datetime, timedelta
+
+def lambda_handler(event, context):
+    # Define AWS region and other parameters
+    region = 'eu-central-1'  # Frankfurt region
+    sqs_queue_url = '' # sqs url
+
+    # Calculate start and end times for the past week
+    end_time = datetime.utcnow()
+    start_time = end_time - timedelta(days=7)
+
+    # Create CloudWatch and SQS clients
+    cloudwatch = boto3.client('cloudwatch', region_name=region)
+    sqs = boto3.client('sqs', region_name=region)
+
+    # Get all EC2 instances in the region
+    ec2 = boto3.client('ec2', region_name=region)
+    reservations = ec2.describe_instances().get('Reservations', [])
+
+    # Initialize a list to store instances with low or no CPU utilization
+    instances_to_notify = []
+
+    for reservation in reservations:
+        for instance in reservation['Instances']:
+            instance_id = instance['InstanceId']
+
+            # Get max CPU utilization metric for the past week
+            try:
+                response = cloudwatch.get_metric_statistics(
+                    Namespace='AWS/EC2',
+                    MetricName='CPUUtilization',
+                    Dimensions=[{'Name': 'InstanceId', 'Value': instance_id}],
+                    StartTime=start_time,
+                    EndTime=end_time,
+                    Period=3600,  # 1 hour intervals
+                    Statistics=['Maximum']
+                )
+
+                if not response['Datapoints']:
+                    # Add instance to the list without recent data
+                    instances_to_notify.append(f"EC2 instance {instance_id} has not recorded any CPU usage.")
+                    continue
+
+                max_cpu = response['Datapoints'][0]['Maximum']
+
+                # # Check if CPU utilization is 0 or less
+                # if max_cpu <= 5.0:
+                #     # Add instance to the list with low CPU utilization
+                #     instances_to_notify.append(f"EC2 instance {instance_id} has max CPU utilization of less than 5% in the past week.")
+            except ClientError as e:
+                print(f"Error checking CPU utilization for instance {instance_id}: {e}")
+
+    # Send results to SQS queue
+    for message in instances_to_notify:
+        try:
+            sqs.send_message(
+                QueueUrl=sqs_queue_url,
+                MessageBody=message
+            )
+        except ClientError as e:
+            print(f"Error sending message to SQS: {e}")
+
+    return {
+        'statusCode': 200,
+        'body': 'Function executed successfully!'
+    }
+
