@@ -1,0 +1,96 @@
+import boto3
+import requests
+import json
+
+def lambda_handler(event, context):
+    # Initialize SQS client
+    sqs = boto3.client('sqs', region_name='eu-central-1')
+    queue_url = '' #sqs url
+
+    messages_accumulated = []
+
+    while True:
+        # Receive messages from SQS queue
+        response = sqs.receive_message(
+            QueueUrl=queue_url,
+            AttributeNames=['All'],
+            MaxNumberOfMessages=10,
+            WaitTimeSeconds=0,
+        )
+
+        messages = response.get('Messages', [])
+
+        if not messages:
+            break
+
+        for message in messages:
+            body = message.get('Body')
+            receipt_handle = message.get('ReceiptHandle')
+
+            if body:
+                messages_accumulated.append(body)
+                # Delete received message from queue
+                sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
+
+    # Combine messages into a single string
+    content = "<br>".join(messages_accumulated)
+
+    # Post to Confluence
+    status_code, response_content = post_to_confluence(content)
+    print(f"Content to be posted to Confluence: {content}")
+    print(f"Confluence API Response Status: {status_code}")
+    print(f"Confluence API Response Content: {response_content}")
+
+def post_to_confluence(content):
+    confluence_url = "" #confluence api url
+    space_key = "SA"
+    page_title = "AWS Potential Unused VMs"
+    api_url = f"{confluence_url}/rest/api/content"
+
+    # Bearer Token
+    api_token = "" #api token
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_token}"
+    }
+
+    # Format the content for Confluence's XHTML storage format
+    formatted_content = "<p>" + content.replace("<br>", "</p><p>") + "</p>"
+
+    confluence_content = {
+        "type": "page",
+        "title": page_title,
+        "space": {"key": space_key},
+        "body": {
+            "storage": {
+                "value": formatted_content,
+                "representation": "storage"
+            }
+        }
+    }
+
+    search_params = {"title": page_title, "spaceKey": space_key, "expand": "version"}
+    search_response = requests.get(api_url, params=search_params, headers=headers)
+
+    # Check if the response is successful
+    if search_response.status_code != 200:
+        print(f"Failed to retrieve page: Status code {search_response.status_code}, Response: {search_response.text}")
+        return search_response.status_code, search_response.text
+
+    try:
+        search_results = search_response.json()
+    except json.JSONDecodeError:
+        print(f"Failed to decode JSON from response: {search_response.text}")
+        return search_response.status_code, search_response.text
+
+    if search_results["size"] == 0:
+        response = requests.post(api_url, data=json.dumps(confluence_content), headers=headers)
+    else:
+        page_id = search_results["results"][0]["id"]
+        current_version = search_results["results"][0]["version"]["number"]
+        confluence_content["version"] = {"number": current_version + 1}
+        update_url = f"{api_url}/{page_id}"
+        response = requests.put(update_url, data=json.dumps(confluence_content), headers=headers)
+
+    return response.status_code, response.content
